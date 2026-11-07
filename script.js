@@ -1,17 +1,22 @@
 // Executa também quando o site é aberto direto como arquivo local (file://).
 (async function startClinicSite() {
 const firebaseConfig = window.CLINIC_FIREBASE_CONFIG || {
-  apiKey: "", authDomain: "", projectId: "", storageBucket: "", messagingSenderId: "", appId: ""
+  apiKey: "AIzaSyBhRlqzsXI9ZtWe5Gj2S2BMPVKsiKw549s",
+  authDomain: "agendamentobarbearia50kdemo.firebaseapp.com",
+  projectId: "agendamentobarbearia50kdemo",
+  storageBucket: "agendamentobarbearia50kdemo.firebasestorage.app",
+  messagingSenderId: "619851119582",
+  appId: "1:619851119582:web:88a26a1d8fdd9eb9613b4f"
 };
 const hasFirebase = Boolean(firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId);
 let db = null;
-let initializeFirestoreForClinic, doc, serverTimestamp, collection, getDocs, runTransaction;
+let initializeFirestoreForClinic, doc, getDoc, serverTimestamp, collection, getDocs, runTransaction;
 if (hasFirebase) {
   const [{ initializeApp }, firestore] = await Promise.all([
     import("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js"),
     import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js")
   ]);
-  ({ initializeFirestore: initializeFirestoreForClinic, doc, serverTimestamp, collection, getDocs, runTransaction } = firestore);
+  ({ initializeFirestore: initializeFirestoreForClinic, doc, getDoc, serverTimestamp, collection, getDocs, runTransaction } = firestore);
   const app = initializeApp(firebaseConfig);
   db = initializeFirestoreForClinic(app, { experimentalAutoDetectLongPolling: true });
 }
@@ -31,10 +36,66 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
 const clinicDate = ymd => new Date(`${ymd}T12:00:00`).toLocaleDateString('pt-BR');
 $('connectionNotice').hidden=hasFirebase;
 
+let bookingSchedule = { weekdays: [1,2,3,4,5], inicio: '09:00', fim: '19:00', intervalo: 30, breakStart: '', breakEnd: '' };
+
 async function loadDoctors() {
-  // Equipe fixa do site. As reservas continuam sendo persistidas no Firestore quando configurado.
-  doctors = SEED_DOCTORS.map(doctor => ({ ...doctor, dias: [...doctor.dias] }));
-  renderDoctors();
+  if (!db) {
+    doctors = SEED_DOCTORS.map(doctor => ({ ...doctor, dias: [...doctor.dias] }));
+    renderDoctors();
+    return;
+  }
+  try {
+    const [professionalsSnap, hoursSnap, weekSnap] = await Promise.all([
+      getDocs(collection(db, 'profissionais')),
+      getDoc(doc(db, 'config', 'horarios')),
+      getDoc(doc(db, 'config', 'semana'))
+    ]);
+    const hours = hoursSnap.exists() ? hoursSnap.data() : {};
+    const week = weekSnap.exists() ? weekSnap.data() : {};
+    bookingSchedule = {
+      weekdays: Array.isArray(week.weekdays) ? week.weekdays : [1,2,3,4,5],
+      inicio: week.dayStart || hours.inicio || '09:00',
+      fim: week.dayEnd || hours.fim || '19:00',
+      intervalo: 30,
+      breakStart: hours.breakStart || '',
+      breakEnd: hours.breakEnd || ''
+    };
+    const activeProfessionals = professionalsSnap.docs
+      .map(s => ({ id: s.id, ...s.data() }))
+      .filter(p => p.nome && p.ativo !== false)
+      .map(p => ({
+        id: p.id,
+        nome: p.nome,
+        especialidade: p.especialidade || 'Barbeiro',
+        colecao: p.colecao || `reservas_${slugify(p.nome)}`,
+        fotoUrl: p.fotoUrl || '',
+        inicio: p.inicio || bookingSchedule.inicio,
+        fim: p.fim || bookingSchedule.fim,
+        dias: [...bookingSchedule.weekdays],
+        intervalo: 30
+      }));
+    doctors = activeProfessionals.length ? activeProfessionals : [{
+      id: 'rodrigotorre2', nome: 'Rodrigo Torre2', especialidade: 'Barbeiro',
+      colecao: 'reservas_rodrigotorre2', fotoUrl: '', inicio: bookingSchedule.inicio,
+      fim: bookingSchedule.fim, dias: [...bookingSchedule.weekdays], intervalo: 30,
+      isFallback: true
+    }];
+    renderDoctors();
+  } catch (error) {
+    console.error('Não foi possível carregar a agenda do painel:', error);
+    const notice = $('connectionNotice');
+    notice.hidden = false;
+    notice.textContent = 'Não foi possível conectar à agenda agora. Atualize a página antes de solicitar um horário.';
+    $('bookButton').disabled = true;
+    $('doctorSelect').innerHTML = '<option value="">Agenda indisponível</option>';
+    $('doctorSelect').disabled = true;
+    $('appointmentDate').disabled = true;
+    $('appointmentTime').disabled = true;
+  }
+}
+
+function slugify(value) {
+  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
 function renderDoctors() {
   const container=$('profissionaisContainer');
@@ -44,18 +105,46 @@ function renderDoctors() {
   container.querySelectorAll('[data-select-doctor]').forEach(a=>a.addEventListener('click',()=>{ $('doctorSelect').value=a.dataset.selectDoctor; refreshTimeOptions(); }));
 }
 function formatDays(days) { const names=['dom','seg','ter','qua','qui','sex','sáb']; return (days||[]).map(n=>names[n]).join(', '); }
-function slotsFor(doctor,date) {
+function slotsFor(doctor,date,override={}) {
   if (!date || !doctor) return [];
   const day=new Date(`${date}T12:00:00`).getDay();
-  if (!(doctor.dias||[]).includes(day)) return [];
-  const [sh,sm]=doctor.inicio.split(':').map(Number), [eh,em]=doctor.fim.split(':').map(Number);
-  const start=sh*60+sm, end=eh*60+em, step=Number(doctor.intervalo)||30, out=[];
+  if (!(override.weekdays || doctor.dias || []).includes(day)) return [];
+  const startText=override.inicio || doctor.inicio, endText=override.fim || doctor.fim;
+  const [sh,sm]=startText.split(':').map(Number), [eh,em]=endText.split(':').map(Number);
+  const start=sh*60+sm, end=eh*60+em, step=Number(override.intervalo || doctor.intervalo)||30, out=[];
+  const breakStart=override.breakStart ? override.breakStart.split(':').map(Number).reduce((h,m)=>h*60+m,0) : null;
+  const breakEnd=override.breakEnd ? override.breakEnd.split(':').map(Number).reduce((h,m)=>h*60+m,0) : null;
   const now=new Date();
   for(let t=start;t+step<=end;t+=step) {
+    if (breakStart !== null && breakEnd !== null && t < breakEnd && t+step > breakStart) continue;
     const slot=`${String(Math.floor(t/60)).padStart(2,'0')}:${String(t%60).padStart(2,'0')}`;
     if(date!==localYMD(now) || t>now.getHours()*60+now.getMinutes()) out.push(slot);
   }
   return out;
+}
+async function availableSlots(doctor,date) {
+  if (!db) return slotsFor(doctor,date);
+  const [generalSnap, profSnap] = await Promise.all([
+    getDoc(doc(db, 'config', 'excecoes', 'dias', date)),
+    doctor.isFallback
+      ? Promise.resolve(null)
+      : getDoc(doc(db, 'profissionais', doctor.id, 'excecoes', date))
+  ]);
+  const general=generalSnap.exists() ? generalSnap.data() : {};
+  const professional=profSnap?.exists() ? profSnap.data() : {};
+  if (professional.fechado === true || general.fechado === true) return [];
+  const exceptionStart=professional.inicio || general.inicio || '';
+  const exceptionEnd=professional.fim || general.fim || '';
+  const day=new Date(`${date}T12:00:00`).getDay();
+  if (!bookingSchedule.weekdays.includes(day) && !(exceptionStart && exceptionEnd)) return [];
+  return slotsFor(doctor,date,{
+    weekdays: [day],
+    inicio: exceptionStart || bookingSchedule.inicio,
+    fim: exceptionEnd || bookingSchedule.fim,
+    intervalo: bookingSchedule.intervalo,
+    breakStart: bookingSchedule.breakStart,
+    breakEnd: bookingSchedule.breakEnd
+  });
 }
 function localYMD(date) { return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`; }
 async function listBookings() {
@@ -73,7 +162,7 @@ async function listBookings() {
 }
 async function dateBookings(doctor,date) {
   const bookings=await listBookings();
-  return bookings.filter(b=>b.doctorId===doctor.id && b.data===date && b.status!=='cancelled');
+  return bookings.filter(b=>b._collection===doctor.colecao && b.data===date && b.status!=='cancelled');
 }
 let availabilityRequestId = 0;
 async function refreshTimeOptions() {
@@ -84,7 +173,7 @@ async function refreshTimeOptions() {
   if (!doctor || !date) { select.disabled=true;select.innerHTML='<option value="">Escolha barbeiro e data</option>';return; }
   const today=new Date();today.setHours(0,0,0,0);
   if (new Date(`${date}T00:00:00`)<today) { select.disabled=true;select.innerHTML='<option value="">Escolha uma data futura</option>';return; }
-  const slots=slotsFor(doctor,date);
+  const slots=await availableSlots(doctor,date);
     if (!slots.length) {
     select.disabled=true;
     select.innerHTML='<option value="">Sem atendimento nesta data; escolha outro dia</option>';
@@ -119,12 +208,14 @@ $('appointmentDate').value=localYMD(firstClinicDay);
 $('bookingForm').addEventListener('submit',async event=>{
   event.preventDefault();const doctor=doctors.find(d=>d.id===$('doctorSelect').value),date=$('appointmentDate').value,time=$('appointmentTime').value,name=$('patientName').value.trim(),phone=$('patientPhone').value.trim();
   const msg=$('bookingMessage');msg.classList.remove('success');msg.textContent='';
-  if(!doctor||!slotsFor(doctor,date).includes(time)){msg.textContent='Selecione um horário válido.';return;}
+  if(!doctor||!(await availableSlots(doctor,date)).includes(time)){msg.textContent='Selecione um horário válido.';return;}
+  const alreadyBooked=await dateBookings(doctor,date);
+  if(alreadyBooked.some(b=>b.hora===time)){msg.textContent='Este horário acabou de ser reservado. Escolha outro.';await refreshTimeOptions();return;}
   if(name.length<3 || phone.replace(/\D/g,'').length<10){msg.textContent='Informe seu nome completo e um telefone válido com DDD.';return;}
   const button=$('bookButton');button.disabled=true;button.innerHTML='Registrando pedido…';
   try {
     const col=doctor.colecao, key=`${date}_${time}`;
-    const record={data:date,hora:time,doctorId:doctor.id,profissional:doctor.nome,profissionalNome:doctor.nome,especialidade:doctor.especialidade,clienteNomeCompleto:name,clienteNome:name,clienteTelefone:phone,status:'pending',createdAt:Date.now()};
+    const record={data:date,hora:time,doctorId:doctor.id,profissional:doctor.nome,profissionalNome:doctor.nome,especialidade:doctor.especialidade,servicoNome:'Agendamento online',servicoTempoMin:30,clienteNomeCompleto:name,clienteNome:name,clienteTelefone:phone,status:'pending',createdAt:Date.now()};
     if(db) await runTransaction(db,async tx=>{const ref=doc(db,col,key);const snap=await tx.get(ref);if(snap.exists()&&snap.data()?.status!=='cancelled')throw new Error('SLOT_TAKEN');tx.set(ref,{...record,createdAt:serverTimestamp()});});
     else {const all=localGet(LOCAL_BOOKINGS_KEY,[]);if(all.some(b=>b.id===key&&b.doctorId===doctor.id&&b.status!=='cancelled'))throw new Error('SLOT_TAKEN');const retained=all.filter(b=>!(b.id===key&&b.doctorId===doctor.id));retained.push({...record,id:key,_collection:col});localSet(LOCAL_BOOKINGS_KEY,retained);}
     $('confirmationSummary').textContent=`${doctor.nome} · ${doctor.especialidade} · ${clinicDate(date)} às ${time}.`;
